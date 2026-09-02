@@ -660,6 +660,10 @@ type FlavorAssigner struct {
 	quotaCheckStrategy   configapi.QuotaCheckStrategy
 	resourceFormatter    *resources.ResourceFormatter
 
+	// committedDomainUsage is the topology capacity the current scheduling cycle
+	// has already handed to earlier entries. Read-only; nil outside a cycle.
+	committedDomainUsage map[tas.TopologyDomainID]resources.Requests
+
 	// schedulingCycle is the cycle this assignment is being computed in. It is recorded
 	// on the assignment so that a later cycle can tell how old the assignment is.
 	schedulingCycle int64
@@ -687,6 +691,14 @@ func New(
 		resourceFormatter:    resourceFormatter,
 		schedulingCycle:      schedulingCycle,
 	}
+}
+
+// WithCommittedDomainUsage records the topology capacity the current scheduling
+// cycle has already handed to earlier entries, so the reserve search does not
+// hand the same domain out twice. Returns the receiver for chaining.
+func (a *FlavorAssigner) WithCommittedDomainUsage(m map[tas.TopologyDomainID]resources.Requests) *FlavorAssigner {
+	a.committedDomainUsage = m
+	return a
 }
 
 // Assign assigns a flavor to each of the resources requested in each pod set.
@@ -882,6 +894,7 @@ func (a *FlavorAssigner) assignFlavors(ctx context.Context, log logr.Logger, cou
 				ctx,
 				tasRequests,
 				schdcache.WithSimulateEmpty(true),
+				schdcache.WithCommittedDomainUsage(a.committedDomainUsage),
 				schdcache.WithWorkload(a.wl.Obj),
 			)
 			if failure := result.Failure(); failure != nil {

@@ -59,6 +59,7 @@ import (
 	"sigs.k8s.io/kueue/pkg/util/resourcegroups"
 	"sigs.k8s.io/kueue/pkg/util/roletracker"
 	"sigs.k8s.io/kueue/pkg/util/routine"
+	utiltas "sigs.k8s.io/kueue/pkg/util/tas"
 	"sigs.k8s.io/kueue/pkg/util/wait"
 	"sigs.k8s.io/kueue/pkg/workload"
 	"sigs.k8s.io/kueue/pkg/workload/concurrentadmission"
@@ -356,8 +357,9 @@ func (s *Scheduler) schedule(ctx context.Context) wait.SpeedSignal {
 	phaseStartTime = s.clock.Now()
 	preemptedWorkloads := make(preemption.PreemptedWorkloads)
 	skippedPreemptions := make(map[kueue.ClusterQueueReference]int)
+	commitments := newCycleCommitments()
 	for iterator.hasNext() {
-		s.processEntry(ctx, iterator.pop(), snapshot, preemptedWorkloads, skippedPreemptions)
+		s.processEntry(ctx, iterator.pop(), snapshot, preemptedWorkloads, skippedPreemptions, commitments)
 	}
 
 	// 6. Requeue the heads that were not scheduled.
@@ -411,6 +413,36 @@ func (s *Scheduler) finishEntry(ctx context.Context, log logr.Logger, e *entry) 
 	return false
 }
 
+// cycleCommitments is the topology capacity the current scheduling cycle has
+// already handed to entries processed earlier in it. The scheduler snapshot
+// records this in leafCapacity.tasUsage, but the simulate-empty placement search
+// deliberately ignores tasUsage, so entries placed later in the cycle need it
+// supplied explicitly. See applyDomainReservations in pkg/cache/scheduler.
+type cycleCommitments struct {
+	domainUsage map[utiltas.TopologyDomainID]resources.Requests
+}
+
+func newCycleCommitments() *cycleCommitments {
+	return &cycleCommitments{domainUsage: make(map[utiltas.TopologyDomainID]resources.Requests)}
+}
+
+// record folds a committed workload usage into the per-domain totals, mirroring
+// how ClusterQueueSnapshot.updateTASUsage folds workload.Usage.TAS into the
+// snapshot. Usage is aggregated across flavors by domain, matching how the
+// placement search keys its reservations.
+func (c *cycleCommitments) record(usage workload.Usage) {
+	for _, flavorUsage := range usage.TAS {
+		for _, tr := range flavorUsage {
+			domainID := utiltas.DomainID(tr.Values)
+			if existing, found := c.domainUsage[domainID]; found {
+				existing.Add(tr.TotalRequests())
+				continue
+			}
+			c.domainUsage[domainID] = tr.TotalRequests()
+		}
+	}
+}
+
 // processEntry runs the admission pipeline for a single entry: TAS replacement,
 // preempt-mode pre-checks, fits/overlap checks, preemption issuance, pods-ready
 // gating, workload-slice replacement, and admission. State (entry status,
@@ -421,6 +453,7 @@ func (s *Scheduler) processEntry(
 	snapshot *schdcache.Snapshot,
 	preemptedWorkloads preemption.PreemptedWorkloads,
 	skippedPreemptions map[kueue.ClusterQueueReference]int,
+	commitments *cycleCommitments,
 ) {
 	cq := snapshot.ClusterQueue(e.ClusterQueue)
 	log := ctrl.LoggerFrom(ctx).WithValues("workload", klog.KObj(e.Obj), "clusterQueue", klog.KRef("", string(e.ClusterQueue)))
@@ -445,7 +478,7 @@ func (s *Scheduler) processEntry(
 	// We may also recompute in case of overlapping preemption targets with another workload.
 	// Recompute when needed so CQs considered later in the cycle don't repeatedly
 	// lose to earlier CQs and starve for prolonged periods.
-	usage, fits := s.updateAssignmentIfNeeded(ctx, log, e, snapshot, cq, preemptedWorkloads)
+	usage, fits := s.updateAssignmentIfNeeded(ctx, log, e, snapshot, cq, preemptedWorkloads, commitments)
 	mode := e.assignment.RepresentativeMode()
 
 	if features.Enabled(features.TASFailedNodeReplacementFailFast) && workload.HasTopologyAssignmentWithUnhealthyNode(e.Obj) && mode != flavorassigner.Fit {
@@ -464,7 +497,7 @@ func (s *Scheduler) processEntry(
 		if len(e.preemptionTargets) == 0 {
 			e.requeueReason = qcache.RequeueReasonPreemptionNoCandidates
 			e.quotaReservedReason = kueue.WorkloadQuotaReservedReasonWaitingForQuota
-			s.reserveCapacityForUnreclaimablePreempt(log, e, cq)
+			s.reserveCapacityForUnreclaimablePreempt(log, e, cq, commitments)
 			return
 		}
 		if (features.Enabled(features.ConcurrentAdmission) || features.Enabled(features.MultiKueueOrchestratedPreemption)) && workload.HasClosedPreemptionGate(e.Obj) {
@@ -489,6 +522,7 @@ func (s *Scheduler) processEntry(
 		// become available.
 		e.LastAssignment = nil
 		cq.AddUsage(usage)
+		commitments.record(usage)
 		return
 	}
 
@@ -510,6 +544,7 @@ func (s *Scheduler) processEntry(
 	}
 	preemptedWorkloads.Insert(e.preemptionTargets)
 	cq.AddUsage(usage)
+	commitments.record(usage)
 
 	// Filter out the old workload slice from the preemption targets.
 	// The old workload slice is initially included in the preemption targets because it is treated
@@ -561,10 +596,12 @@ func (s *Scheduler) handleFailedTASReplacement(ctx context.Context, log logr.Log
 // nominal capacity, or if the workload is an active preemptor waiting for evictions
 // to complete, we reserve up to the borrowing limit so that lower-priority
 // workloads in another Cohort cannot admit before us.
-func (s *Scheduler) reserveCapacityForUnreclaimablePreempt(log logr.Logger, e *entry, cq *schdcache.ClusterQueueSnapshot) {
+func (s *Scheduler) reserveCapacityForUnreclaimablePreempt(log logr.Logger, e *entry, cq *schdcache.ClusterQueueSnapshot, commitments *cycleCommitments) {
 	log.V(2).Info("Workload requires preemption, but there are no candidate workloads allowed for preemption", "preemption", cq.Preemption)
 	if !preemption.CanAlwaysReclaim(cq) || (features.Enabled(features.PrioritizePreemptorWorkloads) && e.IsPreemptor) {
-		cq.AddUsage(resourcesToReserve(log, e, cq))
+		reserved := resourcesToReserve(log, e, cq)
+		cq.AddUsage(reserved)
+		commitments.record(reserved)
 	}
 }
 
@@ -735,7 +772,9 @@ func (s *Scheduler) nominateWorkload(ctx context.Context, log logr.Logger, h qca
 			}
 		}
 	} else {
-		assignment, targets := s.getAssignments(ctx, &e.Info, snap)
+		// Nomination happens before the cycle commits anything, so there are
+		// no commitments to pass yet.
+		assignment, targets := s.getAssignments(ctx, &e.Info, snap, newCycleCommitments())
 		e.recordAssignment(assignment, targets)
 		return e, true
 	}
@@ -748,7 +787,8 @@ func (s *Scheduler) updateAssignmentIfNeeded(
 	e *entry,
 	snapshot *schdcache.Snapshot,
 	cq *schdcache.ClusterQueueSnapshot,
-	preemptedWorkloads preemption.PreemptedWorkloads) (workload.Usage, bool) {
+	preemptedWorkloads preemption.PreemptedWorkloads,
+	commitments *cycleCommitments) (workload.Usage, bool) {
 	usage := e.assignmentUsage(log)
 	fitsCheck := fits(snapshot, cq, &usage, preemptedWorkloads, e.preemptionTargets)
 
@@ -773,7 +813,7 @@ func (s *Scheduler) updateAssignmentIfNeeded(
 	// reach all flavors from the nomination.
 	e.LastAssignment = nil
 	e.NominationMapping = e.readResourceToFlavorMapping()
-	newAssignment, newTargets := s.getAssignments(ctx, &e.Info, snapshot)
+	newAssignment, newTargets := s.getAssignments(ctx, &e.Info, snapshot, commitments)
 	e.recordAssignment(newAssignment, newTargets)
 	if needsOverlapRecompute {
 		if revertRemoval != nil {
@@ -856,7 +896,7 @@ type partialAssignment struct {
 	preemptionTargets []*preemption.Target
 }
 
-func (s *Scheduler) getAssignments(ctx context.Context, wl *workload.Info, snap *schdcache.Snapshot) (flavorassigner.Assignment, []*preemption.Target) {
+func (s *Scheduler) getAssignments(ctx context.Context, wl *workload.Info, snap *schdcache.Snapshot, commitments *cycleCommitments) (flavorassigner.Assignment, []*preemption.Target) {
 	cq := snap.ClusterQueue(wl.ClusterQueue)
 	// The flavor scan resumes from the progress recorded in LastAssignment, so it has to be
 	// dropped once it no longer describes the current state. Deciding that here rather than
@@ -868,8 +908,8 @@ func (s *Scheduler) getAssignments(ctx context.Context, wl *workload.Info, snap 
 			"wl.LastAssignment.ClusterQueueGeneration", wl.LastAssignment.ClusterQueueGeneration)
 		wl.LastAssignment = nil
 	}
-	assignment, targets := s.getInitialAssignments(ctx, wl, snap)
-	updateAssignmentForTAS(ctx, snap, cq, wl, &assignment, targets)
+	assignment, targets := s.getInitialAssignments(ctx, wl, snap, commitments)
+	updateAssignmentForTAS(ctx, snap, cq, wl, &assignment, targets, commitments)
 	return assignment, targets
 }
 
@@ -915,7 +955,7 @@ func lastAssignmentOutdated(last *workload.AssignmentClusterQueueState, currentC
 //     identified during scheduling.
 //
 // If no valid assignment can be made, returns the original full assignment with no preemption targets.
-func (s *Scheduler) getInitialAssignments(ctx context.Context, wl *workload.Info, snap *schdcache.Snapshot) (flavorassigner.Assignment, []*preemption.Target) {
+func (s *Scheduler) getInitialAssignments(ctx context.Context, wl *workload.Info, snap *schdcache.Snapshot, commitments *cycleCommitments) (flavorassigner.Assignment, []*preemption.Target) {
 	cq := snap.ClusterQueue(wl.ClusterQueue)
 
 	preemptionTargets, replaceableWorkloadSlice := workloadslicing.ReplacedWorkloadSlice(wl, snap)
@@ -923,7 +963,7 @@ func (s *Scheduler) getInitialAssignments(ctx context.Context, wl *workload.Info
 		wl, cq, snap.ResourceFlavors, fairsharing.Enabled(s.fairSharing),
 		preemption.NewOracle(s.preemptor, snap), replaceableWorkloadSlice,
 		s.quotaCheckStrategy, s.resourceFormatter, s.schedulingCycle,
-	)
+	).WithCommittedDomainUsage(commitments.domainUsage)
 	fullAssignment := flvAssigner.Assign(ctx, nil)
 
 	arm := fullAssignment.RepresentativeMode()
@@ -983,6 +1023,7 @@ func updateAssignmentForTAS(
 	wl *workload.Info,
 	assignment *flavorassigner.Assignment,
 	targets []*preemption.Target,
+	commitments *cycleCommitments,
 ) {
 	log := log.FromContext(ctx)
 
@@ -1015,6 +1056,7 @@ func updateAssignmentForTAS(
 				ctx,
 				tasRequests,
 				schdcache.WithSimulateEmpty(true),
+				schdcache.WithCommittedDomainUsage(commitments.domainUsage),
 				schdcache.WithWorkload(wl.Obj),
 			)
 		}
