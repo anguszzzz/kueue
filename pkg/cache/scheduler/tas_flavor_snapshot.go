@@ -450,6 +450,7 @@ type findTopologyAssignmentsOption struct {
 	simulateEmpty          bool
 	workload               *kueue.Workload
 	aggregatedDomainUsages map[utiltas.TopologyDomainID]resources.Requests
+	committedDomainUsage   map[utiltas.TopologyDomainID]resources.Requests
 }
 
 type tasExclusionStats struct {
@@ -576,6 +577,22 @@ func WithAggregatedDomainUsages(m map[utiltas.TopologyDomainID]resources.Request
 	}
 }
 
+// WithCommittedDomainUsage supplies the topology capacity the current scheduling
+// cycle has already handed to entries processed earlier in the same cycle.
+//
+// Unlike WithAggregatedDomainUsages, the map is read-only here: nothing
+// accumulates into it, so callers may share one map across the whole cycle.
+//
+// It only affects the simulateEmpty search. That search deliberately ignores
+// leafCapacity.tasUsage, because occupancy by preemptible work is not a reason to
+// rule a domain out — but it must not ignore capacity this cycle has just
+// committed, which the entry being placed cannot preempt.
+func WithCommittedDomainUsage(m map[utiltas.TopologyDomainID]resources.Requests) FindTopologyAssignmentsOption {
+	return func(o *findTopologyAssignmentsOption) {
+		o.committedDomainUsage = m
+	}
+}
+
 // FindTopologyAssignmentsForFlavor returns TAS assignment, if possible, for all
 // the TAS requests in the flavor handled by the snapshot.
 func (s *TASFlavorSnapshot) FindTopologyAssignmentsForFlavor(ctx context.Context, flavorTASRequests FlavorTASRequests, options ...FindTopologyAssignmentsOption) TASAssignmentsResult {
@@ -650,7 +667,7 @@ func (s *TASFlavorSnapshot) FindTopologyAssignmentsForFlavor(ctx context.Context
 			}
 
 			// Normal path: no previous assignment or stale assignment
-			assignments, reason := s.findTopologyAssignment(ctx, workers, leader, assumedUsage, opts.simulateEmpty, "", opts.workload)
+			assignments, reason := s.findTopologyAssignment(ctx, workers, leader, assumedUsage, opts.committedDomainUsage, opts.simulateEmpty, "", opts.workload)
 			for _, tr := range trs {
 				podSetName := tr.PodSet.Name
 				result[podSetName] = tasPodSetAssignmentResult{TopologyAssignment: assignments[podSetName], FailureReason: reason}
@@ -723,7 +740,9 @@ func (s *TASFlavorSnapshot) findReplacementAssignment(
 		trCopy.PodSet.TopologyRequest.PodSetSliceRequiredTopology = effectiveSliceTopology
 		trCopy.PodSet.TopologyRequest.PodSetSliceSize = new(effectiveSliceSize)
 	}
-	replacementAssignment, reason := s.findTopologyAssignment(ctx, trCopy, nil, assumedUsage, false, requiredReplacementDomain, wl)
+	// nil committedUsage: this search runs with simulateEmpty=false, so the
+	// snapshot's tasUsage already accounts for the cycle's commitments.
+	replacementAssignment, reason := s.findTopologyAssignment(ctx, trCopy, nil, assumedUsage, nil, false, requiredReplacementDomain, wl)
 	if reason != "" {
 		return nil, nil, reason
 	}
@@ -891,9 +910,11 @@ func (s *TASFlavorSnapshot) findTopologyAssignment(
 	workersTasPodSetRequests TASPodSetRequests,
 	leaderTasPodSetRequests *TASPodSetRequests,
 	assumedUsage map[utiltas.TopologyDomainID]resources.Requests,
+	committedUsage map[utiltas.TopologyDomainID]resources.Requests,
 	simulateEmpty bool, requiredReplacementDomain utiltas.TopologyDomainID, wl *kueue.Workload) (map[kueue.PodSetReference]*utiltas.TopologyAssignment, string) {
 	requirements := &topologyAssignmentPodRequirements{
 		assumedUsage:              assumedUsage,
+		committedUsage:            committedUsage,
 		requiredReplacementDomain: requiredReplacementDomain,
 		simulateEmpty:             simulateEmpty,
 	}
