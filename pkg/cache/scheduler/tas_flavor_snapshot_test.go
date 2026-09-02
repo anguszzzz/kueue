@@ -1605,3 +1605,52 @@ func TestUpdateCountsToMinimumGenericLogsLeafSummary(t *testing.T) {
 		}
 	})
 }
+
+func TestApplyDomainReservations(t *testing.T) {
+	req := func(cpu int64) resources.Requests {
+		return resources.NewRequestsFromMap(map[corev1.ResourceName]int64{corev1.ResourceCPU: cpu})
+	}
+	cases := map[string]struct {
+		assumed       map[tas.TopologyDomainID]resources.Requests
+		committed     map[tas.TopologyDomainID]resources.Requests
+		simulateEmpty bool
+		wantCPU       int64
+	}{
+		"no reservations leaves capacity untouched": {
+			wantCPU: 1000,
+		},
+		"assumed usage always applies": {
+			assumed: map[tas.TopologyDomainID]resources.Requests{"d1": req(300)},
+			wantCPU: 700,
+		},
+		"committed usage applies under simulateEmpty": {
+			committed:     map[tas.TopologyDomainID]resources.Requests{"d1": req(400)},
+			simulateEmpty: true,
+			wantCPU:       600,
+		},
+		"committed usage is ignored without simulateEmpty, since tasUsage already carries it": {
+			committed: map[tas.TopologyDomainID]resources.Requests{"d1": req(400)},
+			wantCPU:   1000,
+		},
+		"both apply under simulateEmpty": {
+			assumed:       map[tas.TopologyDomainID]resources.Requests{"d1": req(300)},
+			committed:     map[tas.TopologyDomainID]resources.Requests{"d1": req(400)},
+			simulateEmpty: true,
+			wantCPU:       300,
+		},
+		"another domain's reservation does not apply": {
+			committed:     map[tas.TopologyDomainID]resources.Requests{"other": req(400)},
+			simulateEmpty: true,
+			wantCPU:       1000,
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			remaining := resources.NewLazyRequests(req(1000))
+			applyDomainReservations(&remaining, "d1", tc.assumed, tc.committed, tc.simulateEmpty)
+			if got := remaining.Get().ResourceValue(corev1.ResourceCPU); got != tc.wantCPU {
+				t.Errorf("remaining cpu = %d, want %d", got, tc.wantCPU)
+			}
+		})
+	}
+}

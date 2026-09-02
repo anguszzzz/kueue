@@ -459,10 +459,13 @@ type tasExclusionStats struct {
 }
 
 type topologyAssignmentPodRequirements struct {
-	podRequirements           simulator.PodRequirements
-	requests                  resources.Requests
-	leaderRequests            resources.Requests
-	assumedUsage              map[utiltas.TopologyDomainID]resources.Requests
+	podRequirements simulator.PodRequirements
+	requests        resources.Requests
+	leaderRequests  resources.Requests
+	assumedUsage    map[utiltas.TopologyDomainID]resources.Requests
+	// committedUsage is per-cycle and read-only: unlike assumedUsage, nothing
+	// accumulates into it. See applyDomainReservations.
+	committedUsage            map[utiltas.TopologyDomainID]resources.Requests
 	requiredReplacementDomain utiltas.TopologyDomainID
 	simulateEmpty             bool
 	matchKey                  *podSetMatchKey
@@ -1896,6 +1899,34 @@ func (s *TASFlavorSnapshot) remainingCapacityForLeaf(leaf *leafDomain, simulateE
 	return remainingCapacity
 }
 
+// applyDomainReservations subtracts from a leaf domain's remaining capacity the
+// reservations that the snapshot's own tasUsage does not already account for.
+//
+// assumed is the per-Workload accumulation used when one Workload's PodSets are
+// placed across sibling flavors sharing a hostname leaf. It always applies.
+//
+// committed is the topology capacity the current scheduling cycle has already
+// handed to entries processed earlier in the same cycle. It applies only under
+// simulateEmpty. With simulateEmpty=false, remainingCapacityForLeaf has already
+// subtracted leafCapacity.tasUsage, which cq.AddUsage wrote those commitments
+// into, so subtracting here as well would double-count them.
+func applyDomainReservations(
+	remaining *resources.LazyRequests,
+	domainID utiltas.TopologyDomainID,
+	assumed, committed map[utiltas.TopologyDomainID]resources.Requests,
+	simulateEmpty bool,
+) {
+	if assumedUsage, found := assumed[domainID]; found {
+		remaining.Sub(assumedUsage)
+	}
+	if !simulateEmpty {
+		return
+	}
+	if committedUsage, found := committed[domainID]; found {
+		remaining.Sub(committedUsage)
+	}
+}
+
 func (s *TASFlavorSnapshot) fillLeafCounts(leaf *leafDomain, requirements *topologyAssignmentPodRequirements, state *findTopologyAssignmentState, cachingRemainingResourcesEnabled bool) {
 	// leaf.id contains only the hostname for hostname-level topologies, while
 	// levelValues retain the full domain path needed for this ancestry check.
@@ -1905,9 +1936,7 @@ func (s *TASFlavorSnapshot) fillLeafCounts(leaf *leafDomain, requirements *topol
 	}
 	remainingCapacity := s.remainingCapacityForLeaf(leaf, requirements.simulateEmpty, cachingRemainingResourcesEnabled)
 
-	if leafAssumedUsage, found := requirements.assumedUsage[leaf.id]; found {
-		remainingCapacity.Sub(leafAssumedUsage)
-	}
+	applyDomainReservations(&remainingCapacity, leaf.id, requirements.assumedUsage, requirements.committedUsage, requirements.simulateEmpty)
 	var limitingRes corev1.ResourceName
 	leafDomainState := s.domainStateOf(&leaf.domain)
 	leafDomainState.podCount, limitingRes = requirements.requests.CountInWithLimitingResource(remainingCapacity.Get())
