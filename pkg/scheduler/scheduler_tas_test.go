@@ -7577,7 +7577,7 @@ func TestScheduleForTASCohorts(t *testing.T) {
 						Type:               kueue.WorkloadQuotaReserved,
 						Status:             metav1.ConditionFalse,
 						Reason:             kueue.WorkloadQuotaReservedReasonWaitingForQuota,
-						Message:            "Workload no longer fits after processing another workload",
+						Message:            "Workload no longer fits after processing another workload (topology)",
 						LastTransitionTime: metav1.NewTime(now),
 					}).
 					Condition(metav1.Condition{
@@ -7736,7 +7736,7 @@ func TestScheduleForTASCohorts(t *testing.T) {
 						Type:               kueue.WorkloadQuotaReserved,
 						Status:             metav1.ConditionFalse,
 						Reason:             kueue.WorkloadQuotaReservedReasonWaitingForQuota,
-						Message:            "Workload no longer fits after processing another workload",
+						Message:            "Workload no longer fits after processing another workload (topology)",
 						LastTransitionTime: metav1.NewTime(now),
 					}).
 					Condition(metav1.Condition{
@@ -7884,7 +7884,7 @@ func TestScheduleForTASCohorts(t *testing.T) {
 						Type:               kueue.WorkloadQuotaReserved,
 						Status:             metav1.ConditionFalse,
 						Reason:             kueue.WorkloadQuotaReservedReasonWaitingForQuota,
-						Message:            "Workload no longer fits after processing another workload",
+						Message:            "Workload no longer fits after processing another workload (topology)",
 						LastTransitionTime: metav1.NewTime(now),
 					}).
 					Condition(metav1.Condition{
@@ -8780,7 +8780,7 @@ func TestScheduleForTASCohorts(t *testing.T) {
 						Type:               kueue.WorkloadQuotaReserved,
 						Status:             metav1.ConditionFalse,
 						Reason:             kueue.WorkloadQuotaReservedReasonWaitingForQuota,
-						Message:            "Workload no longer fits after processing another workload",
+						Message:            "Workload no longer fits after processing another workload (topology)",
 						LastTransitionTime: metav1.NewTime(now),
 					}).
 					Condition(metav1.Condition{
@@ -9125,7 +9125,7 @@ func TestScheduleForTASCohorts(t *testing.T) {
 						Type:               kueue.WorkloadQuotaReserved,
 						Status:             metav1.ConditionFalse,
 						Reason:             kueue.WorkloadQuotaReservedReasonWaitingForQuota,
-						Message:            "Workload no longer fits after processing another workload",
+						Message:            "Workload no longer fits after processing another workload (topology)",
 						LastTransitionTime: metav1.NewTime(now),
 					}).
 					Condition(metav1.Condition{
@@ -9231,7 +9231,7 @@ func TestScheduleForTASCohorts(t *testing.T) {
 						Type:               kueue.WorkloadQuotaReserved,
 						Status:             metav1.ConditionFalse,
 						Reason:             kueue.WorkloadQuotaReservedReasonWaitingForQuota,
-						Message:            "Workload no longer fits after processing another workload",
+						Message:            "Workload no longer fits after processing another workload (quota)",
 						LastTransitionTime: metav1.NewTime(now),
 					}).
 					Condition(metav1.Condition{
@@ -9265,7 +9265,7 @@ func TestScheduleForTASCohorts(t *testing.T) {
 			},
 			wantEvents: []utiltesting.EventRecord{
 				utiltesting.MakeEventRecord("default", "b1", kueue.WorkloadQuotaReservedReasonWaitingForQuota, corev1.EventTypeWarning).
-					Message("Workload no longer fits after processing another workload").Obj(),
+					Message("Workload no longer fits after processing another workload (quota)").Obj(),
 				utiltesting.MakeEventRecord("default", "a1", "QuotaReserved", corev1.EventTypeNormal).
 					Message("Quota reserved in ClusterQueue tas-cq-a, wait time since queued was 9223372037s; Flavors considered: one: tas-default(Fit;borrow=1)").Obj(),
 				utiltesting.MakeEventRecord("default", "a1", "Admitted", corev1.EventTypeNormal).
@@ -9345,7 +9345,7 @@ func TestScheduleForTASCohorts(t *testing.T) {
 						Type:               kueue.WorkloadQuotaReserved,
 						Status:             metav1.ConditionFalse,
 						Reason:             kueue.WorkloadQuotaReservedReasonWaitingForQuota,
-						Message:            "Workload no longer fits after processing another workload",
+						Message:            "Workload no longer fits after processing another workload (topology)",
 						LastTransitionTime: metav1.NewTime(now),
 					}).
 					Condition(metav1.Condition{
@@ -9521,7 +9521,7 @@ func TestScheduleForTASCohorts(t *testing.T) {
 						Type:               kueue.WorkloadQuotaReserved,
 						Status:             metav1.ConditionFalse,
 						Reason:             kueue.WorkloadQuotaReservedReasonWaitingForQuota,
-						Message:            "Workload no longer fits after processing another workload",
+						Message:            "Workload no longer fits after processing another workload (topology)",
 						LastTransitionTime: metav1.NewTime(now),
 					}).
 					Condition(metav1.Condition{
@@ -9671,7 +9671,7 @@ func TestScheduleForTASCohorts(t *testing.T) {
 						Type:               kueue.WorkloadQuotaReserved,
 						Status:             metav1.ConditionFalse,
 						Reason:             kueue.WorkloadQuotaReservedReasonWaitingForQuota,
-						Message:            "Workload no longer fits after processing another workload",
+						Message:            "Workload no longer fits after processing another workload (topology)",
 						LastTransitionTime: metav1.NewTime(now),
 					}).
 					Condition(metav1.Condition{

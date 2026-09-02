@@ -101,6 +101,10 @@ var (
 	AdmissionCyclePreemptionSkips *prometheus.GaugeVec
 
 	// +metricsdoc:group=clusterqueue
+	// +metricsdoc:labels=cluster_queue="the name of the ClusterQueue",reason="one of `domain_taken`, `quota_taken`, or `targets_claimed`",replica_role="one of `leader`, `follower`, or `standalone`"
+	AdmissionCycleContentionSkips *prometheus.CounterVec
+
+	// +metricsdoc:group=clusterqueue
 	// +metricsdoc:labels=cluster_queue="the name of the ClusterQueue",result="one of `new_targets`, `deferred_fit`, or `skipped`",replica_role="one of `leader`, `follower`, or `standalone`"
 	PreemptionTargetRecomputationsTotal *prometheus.CounterVec
 
@@ -432,6 +436,21 @@ The label 'result' can have the following values:
 		}, append([]string{"cluster_queue", "replica_role"}, clusterQueueMetricsLabels...),
 	)
 	trackGaugeVec(AdmissionCyclePreemptionSkips, gaugeCleanupScopeClusterQueue)
+
+	AdmissionCycleContentionSkips = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Subsystem: constants.KueueName,
+			Name:      "admission_cycle_contention_skips_total",
+			Help: `The total number of times a Workload was skipped in a scheduling cycle because
+another Workload processed earlier in the same cycle had taken what it needed. The label
+'reason' can have the following values:
+- 'domain_taken' means a topology domain the Workload could have used; reported when the fit check
+fails on TAS usage committed earlier in the cycle.
+- 'quota_taken' means quota; reported when the fit check fails on quota committed earlier in the cycle.
+- 'targets_claimed' means its preemption victims had already been claimed by another Workload.
+Globally configured custom ClusterQueue labels are also appended to the base labels.`,
+		}, append([]string{"cluster_queue", "reason", "replica_role"}, clusterQueueMetricsLabels...),
+	)
 
 	PreemptionTargetRecomputationsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -1531,6 +1550,31 @@ func ReportAdmissionCyclePreemptionSkips(cqName kueue.ClusterQueueReference, cou
 	AdmissionCyclePreemptionSkips.WithLabelValues(labels...).Set(float64(count))
 }
 
+// AdmissionCycleContentionSkipReason identifies why an entry was skipped in a
+// scheduling cycle due to contention with entries processed earlier in it.
+type AdmissionCycleContentionSkipReason string
+
+const (
+	// AdmissionCycleContentionDomainTaken means the only topology domain that
+	// could host the Workload was already committed by an earlier entry.
+	AdmissionCycleContentionDomainTaken AdmissionCycleContentionSkipReason = "domain_taken"
+	// AdmissionCycleContentionQuotaTaken means quota the Workload could have
+	// used was already committed by an earlier entry.
+	AdmissionCycleContentionQuotaTaken AdmissionCycleContentionSkipReason = "quota_taken"
+	// AdmissionCycleContentionTargetsClaimed means the Workload's preemption
+	// victims had already been claimed by an earlier entry.
+	AdmissionCycleContentionTargetsClaimed AdmissionCycleContentionSkipReason = "targets_claimed"
+)
+
+// ReportAdmissionCycleContentionSkips increments the counter of Workloads
+// skipped due to in-cycle contention. The reason must be one of
+// AdmissionCycleContentionDomainTaken, AdmissionCycleContentionQuotaTaken, or
+// AdmissionCycleContentionTargetsClaimed.
+func ReportAdmissionCycleContentionSkips(cqName kueue.ClusterQueueReference, reason AdmissionCycleContentionSkipReason, customLabelValues []string, tracker *roletracker.RoleTracker) {
+	labels := append([]string{string(cqName), string(reason), roletracker.GetRole(tracker)}, customLabelValues...)
+	AdmissionCycleContentionSkips.WithLabelValues(labels...).Inc()
+}
+
 // ReportPreemptionTargetRecomputation increments the counter for a preemption
 // target recomputation result. The result must be one of
 // PreemptionTargetRecomputationResultNewTargets, PreemptionTargetRecomputationResultDeferredFit,
@@ -1613,6 +1657,7 @@ func Register() {
 		MultiKueueWorkloadsDispatchedTotal,
 		MultiKueueWorkloadsAdmittedTotal,
 		AdmissionCyclePreemptionSkips,
+		AdmissionCycleContentionSkips,
 		PreemptionTargetRecomputationsTotal,
 		PendingWorkloads,
 		PendingSchedulingHashes,

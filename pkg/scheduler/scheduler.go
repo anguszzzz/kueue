@@ -478,7 +478,7 @@ func (s *Scheduler) processEntry(
 	// We may also recompute in case of overlapping preemption targets with another workload.
 	// Recompute when needed so CQs considered later in the cycle don't repeatedly
 	// lose to earlier CQs and starve for prolonged periods.
-	usage, fits := s.updateAssignmentIfNeeded(ctx, log, e, snapshot, cq, preemptedWorkloads, commitments)
+	usage, fits, fitsCheck := s.updateAssignmentIfNeeded(ctx, log, e, snapshot, cq, preemptedWorkloads, commitments)
 	mode := e.assignment.RepresentativeMode()
 
 	if features.Enabled(features.TASFailedNodeReplacementFailFast) && workload.HasTopologyAssignmentWithUnhealthyNode(e.Obj) && mode != flavorassigner.Fit {
@@ -531,15 +531,23 @@ func (s *Scheduler) processEntry(
 		e.markSkipped("Workload has overlapping preemption targets with another workload")
 		e.quotaReservedReason = kueue.WorkloadQuotaReservedReasonWaitingForQuota
 		skippedPreemptions[cq.Name]++
+		metrics.ReportAdmissionCycleContentionSkips(cq.Name, metrics.AdmissionCycleContentionTargetsClaimed, s.customLabels.CQGet(cq.Name), s.roleTracker)
 		return
 	}
 
 	if !fits {
-		e.markSkipped("Workload no longer fits after processing another workload")
+		cause := "quota"
+		reason := metrics.AdmissionCycleContentionQuotaTaken
+		if fitsCheck == schdcache.FitsCheckNoTAS {
+			cause = "topology"
+			reason = metrics.AdmissionCycleContentionDomainTaken
+		}
+		e.markSkipped(fmt.Sprintf("Workload no longer fits after processing another workload (%s)", cause))
 		e.quotaReservedReason = kueue.WorkloadQuotaReservedReasonWaitingForQuota
 		if mode == flavorassigner.Preempt {
 			skippedPreemptions[cq.Name]++
 		}
+		metrics.ReportAdmissionCycleContentionSkips(cq.Name, reason, s.customLabels.CQGet(cq.Name), s.roleTracker)
 		return
 	}
 	preemptedWorkloads.Insert(e.preemptionTargets)
@@ -788,7 +796,7 @@ func (s *Scheduler) updateAssignmentIfNeeded(
 	snapshot *schdcache.Snapshot,
 	cq *schdcache.ClusterQueueSnapshot,
 	preemptedWorkloads preemption.PreemptedWorkloads,
-	commitments *cycleCommitments) (workload.Usage, bool) {
+	commitments *cycleCommitments) (workload.Usage, bool, schdcache.FitsCheck) {
 	usage := e.assignmentUsage(log)
 	fitsCheck := fits(snapshot, cq, &usage, preemptedWorkloads, e.preemptionTargets)
 
@@ -807,7 +815,7 @@ func (s *Scheduler) updateAssignmentIfNeeded(
 		log.V(2).Info("Re-computing the assignment as it doesn't fit for TAS")
 	default:
 		// Short-circuit, nothing to recompute.
-		return usage, schdcache.FitsCheckOk == fitsCheck
+		return usage, schdcache.FitsCheckOk == fitsCheck, fitsCheck
 	}
 	// Clear the last assignment so that we can start from the first flavor again and
 	// reach all flavors from the nomination.
@@ -843,7 +851,7 @@ func (s *Scheduler) updateAssignmentIfNeeded(
 		metrics.ReportPreemptionTargetRecomputation(e.ClusterQueue, overlapRecomputeResult, s.customLabels.CQGet(e.ClusterQueue), s.roleTracker)
 	}
 
-	return usage, schdcache.FitsCheckOk == fitsCheck
+	return usage, schdcache.FitsCheckOk == fitsCheck, fitsCheck
 }
 
 func fits(snapshot *schdcache.Snapshot, cq *schdcache.ClusterQueueSnapshot, usage *workload.Usage, preemptedWorkloads preemption.PreemptedWorkloads,

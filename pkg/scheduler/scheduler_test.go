@@ -1376,7 +1376,7 @@ func TestSchedule(t *testing.T) {
 						Type:               kueue.WorkloadQuotaReserved,
 						Status:             metav1.ConditionFalse,
 						Reason:             kueue.WorkloadQuotaReservedReasonWaitingForQuota,
-						Message:            "Workload no longer fits after processing another workload",
+						Message:            "Workload no longer fits after processing another workload (quota)",
 						LastTransitionTime: metav1.NewTime(now),
 					}).
 					Condition(metav1.Condition{
@@ -3227,7 +3227,7 @@ func TestSchedule(t *testing.T) {
 						Type:               kueue.WorkloadQuotaReserved,
 						Status:             metav1.ConditionFalse,
 						Reason:             kueue.WorkloadQuotaReservedReasonWaitingForQuota,
-						Message:            "Workload no longer fits after processing another workload",
+						Message:            "Workload no longer fits after processing another workload (quota)",
 						LastTransitionTime: metav1.NewTime(now),
 					}).
 					Condition(metav1.Condition{
@@ -4297,7 +4297,7 @@ func TestSchedule(t *testing.T) {
 						Type:               kueue.WorkloadQuotaReserved,
 						Status:             metav1.ConditionFalse,
 						Reason:             kueue.WorkloadQuotaReservedReasonWaitingForQuota,
-						Message:            "Workload no longer fits after processing another workload",
+						Message:            "Workload no longer fits after processing another workload (quota)",
 						LastTransitionTime: metav1.NewTime(now),
 					}).
 					Condition(metav1.Condition{
@@ -5293,7 +5293,7 @@ func TestSchedule(t *testing.T) {
 						Type:               kueue.WorkloadQuotaReserved,
 						Status:             metav1.ConditionFalse,
 						Reason:             kueue.WorkloadQuotaReservedReasonWaitingForQuota,
-						Message:            "Workload no longer fits after processing another workload",
+						Message:            "Workload no longer fits after processing another workload (quota)",
 						LastTransitionTime: metav1.NewTime(now),
 					}).
 					Condition(metav1.Condition{
@@ -5404,7 +5404,7 @@ func TestSchedule(t *testing.T) {
 						Type:               kueue.WorkloadQuotaReserved,
 						Status:             metav1.ConditionFalse,
 						Reason:             kueue.WorkloadQuotaReservedReasonWaitingForQuota,
-						Message:            "Workload no longer fits after processing another workload",
+						Message:            "Workload no longer fits after processing another workload (quota)",
 						LastTransitionTime: metav1.NewTime(now),
 					}).
 					Condition(metav1.Condition{
@@ -5500,7 +5500,7 @@ func TestSchedule(t *testing.T) {
 						Type:               kueue.WorkloadQuotaReserved,
 						Status:             metav1.ConditionFalse,
 						Reason:             kueue.WorkloadQuotaReservedReasonWaitingForQuota,
-						Message:            "Workload no longer fits after processing another workload",
+						Message:            "Workload no longer fits after processing another workload (quota)",
 						LastTransitionTime: metav1.NewTime(now),
 					}).
 					Condition(metav1.Condition{
