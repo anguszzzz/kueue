@@ -32,6 +32,7 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -14360,5 +14361,196 @@ func TestSecondPassSkipsAssumeWhenWorkloadChangedInCache(t *testing.T) {
 				t.Errorf("unexpected events (-want,+got):\n%s", diff)
 			}
 		})
+	}
+}
+
+// A replica that queued a second-pass copy must not act on it once an update shows the workload is repaired.
+func TestSecondPassSkipsCopyOfRepairedWorkload(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+
+	ns := utiltesting.MakeNamespaceWrapper(metav1.NamespaceDefault).Obj()
+	topology := utiltestingapi.MakeDefaultOneLevelTopology("tas-single-level")
+	rf := utiltestingapi.MakeResourceFlavor("tas-default").
+		NodeLabel("tas-node", "true").
+		TopologyName(topology.Name).
+		Obj()
+	cq := utiltestingapi.MakeClusterQueue("tas-main").
+		ResourceGroup(*utiltestingapi.MakeFlavorQuotas("tas-default").
+			Resource(corev1.ResourceCPU, "50").Obj()).
+		Obj()
+	lq := utiltestingapi.MakeLocalQueue("tas-main", ns.Name).ClusterQueue(cq.Name).Obj()
+	makeNode := func(name string) corev1.Node {
+		return *testingnode.MakeNode(name).
+			Label("tas-node", "true").
+			Label(corev1.LabelHostname, name).
+			StatusAllocatable(corev1.ResourceList{
+				corev1.ResourceCPU:  resource.MustParse("1"),
+				corev1.ResourcePods: resource.MustParse("10"),
+			}).
+			Ready().
+			Obj()
+	}
+	// admittedOn builds the workload admitted on node, listing unhealthy nodes when given.
+	admittedOn := func(node string, unhealthy ...string) *kueue.Workload {
+		wl := utiltestingapi.MakeWorkload("wl", ns.Name).
+			Queue("tas-main").
+			PodSets(*utiltestingapi.MakePodSet("one", 1).
+				RequiredTopologyRequest(corev1.LabelHostname).
+				Request(corev1.ResourceCPU, "1").
+				Obj()).
+			ReserveQuotaAt(
+				utiltestingapi.MakeAdmission("tas-main").
+					PodSets(utiltestingapi.MakePodSetAssignment("one").
+						Assignment(corev1.ResourceCPU, "tas-default", "1000m").
+						TopologyAssignment(utiltestingapi.MakeTopologyAssignment([]string{corev1.LabelHostname}).
+							Domain(utiltestingapi.MakeTopologyDomainAssignment([]string{node}, 1).Obj()).
+							Obj()).
+						Obj()).
+					Obj(),
+				now,
+			).
+			AdmittedAt(true, now)
+		if len(unhealthy) > 0 {
+			wl = wl.UnhealthyNodes(unhealthy...)
+		}
+		return wl.Obj()
+	}
+	// staleCopy is the admitted status the queued copy holds, with x1 listed as unhealthy.
+	staleCopy := admittedOn("x1", "x1")
+
+	cases := map[string]struct {
+		nodes []corev1.Node
+		// repair is the status of the Workload once the previous leader replaced the node or the node recovered.
+		repair *kueue.Workload
+		// wantEvicted expects the copy to still be scheduled, so the workload is evicted.
+		wantEvicted bool
+	}{
+		"workload replaced by the previous leader": {
+			// Only x2 exists, so a replacement computed from the copy does not fit.
+			nodes:  []corev1.Node{makeNode("x2")},
+			repair: admittedOn("x2"),
+		},
+		"workload healed after the node recovered": {
+			// Only the node the copy must leave exists, so a replacement does not fit either.
+			nodes:  []corev1.Node{makeNode("x1")},
+			repair: admittedOn("x1"),
+		},
+		"control: copy still needs the pass": {
+			nodes:       []corev1.Node{makeNode("x1")},
+			wantEvicted: true,
+		},
+	}
+	for name, tc := range cases {
+		for _, useMergePatch := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s when the WorkloadRequestUseMergePatch feature is %t", name, useMergePatch), func(t *testing.T) {
+				features.SetFeatureGateDuringTest(t, features.WorkloadRequestUseMergePatch, useMergePatch)
+				features.SetFeatureGateDuringTest(t, features.TASFailedNodeReplacementFailFast, true)
+				ctx, log := utiltesting.ContextWithLog(t)
+				var statusWrites int
+				clientBuilder := utiltesting.NewClientBuilder().
+					WithObjects(ns.DeepCopy(), topology.DeepCopy(), rf.DeepCopy(), cq.DeepCopy(), lq.DeepCopy(), staleCopy.DeepCopy()).
+					WithStatusSubresource(&kueue.Workload{}).
+					WithInterceptorFuncs(interceptor.Funcs{
+						SubResourcePatch: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+							if _, ok := obj.(*kueue.Workload); ok && subResourceName == "status" {
+								statusWrites++
+							}
+							return c.SubResource(subResourceName).Patch(ctx, obj, patch, opts...)
+						},
+						SubResourceApply: func(ctx context.Context, c client.Client, subResourceName string, applyConf runtime.ApplyConfiguration, opts ...client.SubResourceApplyOption) error {
+							if subResourceName == "status" {
+								statusWrites++
+							}
+							return utiltesting.TreatSSAAsStrategicMergeForApplyConfiguration(ctx, c, subResourceName, applyConf, opts...)
+						},
+					})
+				_ = tasindexer.SetupIndexes(ctx, utiltesting.AsIndexer(clientBuilder))
+				cl := clientBuilder.Build()
+				storedWl := &kueue.Workload{}
+				if err := cl.Get(ctx, client.ObjectKeyFromObject(staleCopy), storedWl); err != nil {
+					t.Fatalf("Getting workload %s: %v", staleCopy.Name, err)
+				}
+				recorder := &utiltesting.EventRecorder{}
+				fakeClock := testingclock.NewFakeClock(now)
+				cqCache := schdcache.New(cl)
+				qManager := qcache.NewManagerForUnitTests(cl, cqCache, qcache.WithClock(fakeClock))
+				for i := range tc.nodes {
+					cqCache.TASCache().SyncNode(&tc.nodes[i])
+				}
+				cqCache.AddOrUpdateResourceFlavor(log, rf.DeepCopy())
+				cqCache.AddOrUpdateTopology(log, topology.DeepCopy())
+				if err := cqCache.AddClusterQueue(ctx, cq.DeepCopy()); err != nil {
+					t.Fatalf("Inserting clusterQueue %s in cache: %v", cq.Name, err)
+				}
+				if err := qManager.AddClusterQueue(ctx, cq.DeepCopy()); err != nil {
+					t.Fatalf("Inserting clusterQueue %s in manager: %v", cq.Name, err)
+				}
+				if err := qManager.AddLocalQueue(ctx, lq.DeepCopy()); err != nil {
+					t.Fatalf("Inserting queue %s/%s in manager: %v", lq.Namespace, lq.Name, err)
+				}
+				cqCache.AddOrUpdateWorkload(ctx, log, storedWl.DeepCopy())
+				if !qManager.QueueSecondPassIfNeeded(ctx, storedWl, 0) {
+					t.Fatal("expected the workload to be queued for a second pass")
+				}
+				// The backoff elapses and the replica keeps a copy of the workload it re-reads.
+				fakeClock.Step(time.Second)
+				if tc.repair != nil {
+					repaired := storedWl.DeepCopy()
+					repaired.Status = tc.repair.Status
+					if err := cl.Status().Update(ctx, repaired); err != nil {
+						t.Fatalf("Updating the repaired workload: %v", err)
+					}
+					cqCache.AddOrUpdateWorkload(ctx, log, repaired)
+					// The update handler delivers the repaired workload, which no longer needs the pass.
+					if qManager.QueueSecondPassIfNeeded(ctx, repaired, 0) {
+						t.Fatal("expected the repaired workload not to need a second pass")
+					}
+				}
+
+				scheduler := New(qManager, cqCache, cl, recorder, WithClock(t, fakeClock), WithPreemptionExpectations(preemptexpectations.New()))
+				wg := sync.WaitGroup{}
+				scheduler.setAdmissionRoutineWrapper(routine.NewWrapper(
+					func() { wg.Add(1) },
+					func() { wg.Done() },
+				))
+
+				ctx, cancel := context.WithTimeout(ctx, queueingTimeout)
+				defer cancel()
+				go cqCache.CleanUpOnContext(ctx)
+				go qManager.CleanUpOnContext(ctx)
+
+				scheduler.schedule(ctx)
+				wg.Wait()
+
+				got := &kueue.Workload{}
+				if err := cl.Get(t.Context(), client.ObjectKeyFromObject(staleCopy), got); err != nil {
+					t.Fatalf("Getting workload %s: %v", staleCopy.Name, err)
+				}
+				if !tc.wantEvicted {
+					if statusWrites != 0 {
+						t.Errorf("got %d workload status writes, want 0: a copy the update removed must not be scheduled", statusWrites)
+					}
+					if len(recorder.RecordedEvents) != 0 {
+						t.Errorf("got events %v, want none for a copy the update removed", recorder.RecordedEvents)
+					}
+					if !meta.IsStatusConditionTrue(got.Status.Conditions, kueue.WorkloadAdmitted) {
+						t.Error("the workload is no longer admitted")
+					}
+					return
+				}
+				if statusWrites == 0 {
+					t.Error("got 0 workload status writes, want the eviction of a copy that still needs the pass")
+				}
+				if c := meta.FindStatusCondition(got.Status.Conditions, kueue.WorkloadEvicted); c == nil || c.Status != metav1.ConditionTrue || c.Reason != kueue.WorkloadEvictedDueToNodeFailures {
+					t.Errorf("the workload evicted condition is %v, want true with reason %s", c, kueue.WorkloadEvictedDueToNodeFailures)
+				}
+				wantEvents := []utiltesting.EventRecord{
+					utiltesting.MakeEventRecord(ns.Name, staleCopy.Name, "EvictedDueToNodeFailures", corev1.EventTypeNormal).Obj(),
+				}
+				if diff := cmp.Diff(wantEvents, recorder.RecordedEvents, cmpopts.IgnoreFields(utiltesting.EventRecord{}, "Message")); diff != "" {
+					t.Errorf("unexpected events (-want,+got):\n%s", diff)
+				}
+			})
+		}
 	}
 }
